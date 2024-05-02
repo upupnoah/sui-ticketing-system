@@ -129,69 +129,28 @@ module ticketing_system::admin {
         transfer::transfer(service_organization_cap, ctx.sender());
     }
 
-    entry fun destroy_service_organization(service_organization_cap: ServiceOrganizationCap, organization_list: &mut OrganizationList, ctx: &mut TxContext) {
-        // get id
-        let ServiceOrganizationCap {id} = service_organization_cap;
-        // get service organization
-        let mut service_organization = organization_list.organizations.remove(id.to_inner());
-        // get index
-        let (_, index) = organization_list.organizations_ids.index_of(&id.to_inner());
-        // remove index
-        organization_list.organizations_ids.remove(index);
-        // delete Service Organization Cap id
-        object::delete(id);
+    entry fun destroy_service(
+        service_organization_cap: &ServiceOrganizationCap,
+        organization_list: &mut OrganizationList,
+        service_id: ID,
+    ) {
+        let service_organization = get_service_organization(service_organization_cap, organization_list);
 
-        // withdraw
-        if (service_organization.income.value() < 100) {
-            // get all balance
-            let all_balance = service_organization.income.withdraw_all();
-            // transfer it to the owner
-            transfer::public_transfer(coin::from_balance(all_balance, ctx), ctx.sender());
-        } else {
-            // use the withdrawal function
-            organization_withdraw_(&mut service_organization, &mut organization_list.publisher_income, ctx);
-        };
+        // Check if the service ID is valid
+        assert!(
+            service_organization.services_ids.contains(&service_id),
+            ENotCorrectService,
+        );
 
-        // deconstruct ServiceOrganization
-        let ServiceOrganization {
-            organization_name: _,
-            mut services,
-            mut services_ids,
-            mut package_services,
-            mut package_services_ids,
-            income,
-        } = service_organization;
+        // Remove the service ID from the list
+        let index = service_organization.services_ids.index_of(&service_id);
+        service_organization.services_ids.remove(index);
 
-        // destroy services
-        while (services_ids.length() > 0) {
-            // get service id
-            let id = services_ids.pop_back();
-            // remove it
-            services.remove(id); // return Service has ability drop
-        };
-        services.destroy_empty();
-        services_ids.destroy_empty();
+        // Remove the service from the table
+        service_organization.services.remove(service_id); // Return Service has ability drop
 
-        // destroy package_services
-        while (package_services_ids.length() > 0) {
-            // get package id
-            let id = package_services_ids.pop_back();
-            // get services
-            let PackageServices {
-                mut services,
-                price: _,
-            } = package_services.remove(id);
-            // clear and destroy services(vector)
-            while (services.length() > 0) {
-                services.pop_back();
-            };
-            services.destroy_empty();
-        };
-        package_services.destroy_empty();
-        package_services_ids.destroy_empty();
-
-        // destroy income
-        income.destroy_zero();
+        // Update package services
+        update_package_services(service_organization_cap, organization_list, service_id);
     }
 
     fun get_service_organization(service_organization_cap: &ServiceOrganizationCap, organization_list: &mut OrganizationList): &mut ServiceOrganization {
@@ -204,116 +163,96 @@ module ticketing_system::admin {
         &mut organization_list.organizations[organization_id]
     }
 
-    entry fun create_service(service_organization_cap: &ServiceOrganizationCap, organization_list: &mut OrganizationList, service_name: String, price: u64, ctx: &mut TxContext) {
-        // get ServiceOrganization
+    entry fun create_service(
+        service_organization_cap: &ServiceOrganizationCap,
+        organization_list: &mut OrganizationList,
+        service_name: String,
+        price: u64,
+        ctx: &mut TxContext,
+    ) {
         let service_organization = get_service_organization(service_organization_cap, organization_list);
 
-        // generate new id
-        let id = object::id_from_address(ctx.fresh_object_address());
-        // create Service
+        // Generate a new ID for the service
+        let service_id = object::id_from_address(ctx.fresh_object_address());
+
+        // Create the Service struct
         let service = Service {
             service_name,
             price,
         };
 
-        // store service
-        service_organization.services.add(id, service);
-        service_organization.services_ids.push_back(id);
+        // Store the service in the organization
+        service_organization.services.add(service_id, service);
+        service_organization.services_ids.push_back(service_id);
     }
 
-    fun update_package_services(service_organization_cap: &ServiceOrganizationCap, organization_list: &mut OrganizationList, service_id: ID) {
-        // get ServiceOrganization
+    fun update_package_services(
+        service_organization_cap: &ServiceOrganizationCap,
+        organization_list: &mut OrganizationList,
+        service_id: ID,
+    ) {
         let service_organization = get_service_organization(service_organization_cap, organization_list);
 
-        // get package services ids
         let package_services_ids = &service_organization.package_services_ids;
-        // get package services
         let package_services = &mut service_organization.package_services;
 
-        let mut i = 0;
-        let mut waiting_destroy_ids = vector<ID>[];
-        while (i < package_services_ids.length()) {
-            // get package id
-            let package_id = package_services_ids[i];
-            // get package_services
-            let package_services = &mut package_services[package_id];
-            // get services
-            let services = &mut package_services.services;
+        let mut packages_to_destroy = vector[];
 
-            // don't contains then continue
-            if (!services.contains(&service_id)) {
-                i = i + 1;
-                continue
-            };
+        // Iterate over package services and update prices
+        for package_id in package_services_ids {
+            let package_service = &mut package_services[*package_id];
+            let services = &mut package_service.services;
 
-            // get index
-            let (_, index) = services.index_of(&service_id);
-            // remove it
-            services.remove(index);
+            if services.contains(&service_id) {
+                services.remove_value(&service_id);
+                if services.length() < 2 {
+                    packages_to_destroy.push_back(*package_id);
+                } else {
+                    let price_decrease = package_service.price / (services.length() + 1);
+                    package_service.price = package_service.price - price_decrease;
+                }
+            }
+        }
 
-            // still have enough service(>= 2) then continue
-            if (services.length() >= 2) {
-                // decrease price
-                let decrease_price = package_services.price / (services.length() + 1);
-                package_services.price = package_services.price - decrease_price;
-
-                i = i + 1;
-                continue
-            };
-
-            // add to waiting destroy list
-            waiting_destroy_ids.push_back(package_id);
-
-            i = i + 1;
-        };
-
-        // destroy package services
-        while (waiting_destroy_ids.length() > 0) {
-            let package_id = waiting_destroy_ids.pop_back();
+        // Destroy package services that no longer have enough services
+        for package_id in packages_to_destroy {
             destroy_package_services(service_organization_cap, organization_list, package_id);
-        };
+        }
+    
+
+
+    // Destroy package services that no longer have enough services
+    for package_id in packages_to_destroy {
+        destroy_package_services(service_organization_cap, organization_list, package_id);
     }
 
-    entry fun destroy_service(service_organization_cap: &ServiceOrganizationCap, organization_list: &mut OrganizationList, service_id: ID) {
-        // get ServiceOrganization
-        let service_organization = get_service_organization(service_organization_cap, organization_list);
-
-        // check service_id
-        assert!(service_organization.services_ids.contains(&service_id), ENotCorrectService);
-
-        // get index of `services_ids`
-        let (_, index) = service_organization.services_ids.index_of(&service_id);
-        // remove it
-        service_organization.services_ids.remove(index);
-
-        // services remove
-        service_organization.services.remove(service_id); // return Service has ability drop
-
-        // update package services
-        update_package_services(service_organization_cap, organization_list, service_id);
     }
-
-    entry fun modify_package_services(service_organization_cap: &ServiceOrganizationCap, organization_list: &mut OrganizationList, package_id: ID, services: vector<ID>) {
-        // get ServiceOrganization
+    entry fun modify_package_services(
+        service_organization_cap: &ServiceOrganizationCap,
+        organization_list: &mut OrganizationList,
+        package_id: ID,
+        new_services: vector<ID>,
+    ) {
         let service_organization = get_service_organization(service_organization_cap, organization_list);
 
-        // check package id
-        assert!(service_organization.package_services_ids.contains(&package_id), ENotCorrectPackage);
+        // Check if the package ID is valid
+        assert!(
+            service_organization.package_services_ids.contains(&package_id),
+            ENotCorrectPackage,
+        );
 
-        // check services
-        let mut i = 0;
-        while (i < services.length()) {
-            let service_id = services[i];
-            assert!(service_organization.services_ids.contains(&service_id), ENotAllCorrectService);
-            i = i + 1;
-        };
+        // Check if all service IDs in the new_services vector are valid
+        for service_id in &new_services {
+            assert!(
+                service_organization.services_ids.contains(service_id),
+                ENotAllCorrectService,
+            );
+        }
 
-        // modify services
+        // Modify the services vector for the package
         let package_services = &mut service_organization.package_services[package_id];
-        let store_services = &mut package_services.services;
-        *store_services = services;
+        package_services.services = new_services;
     }
-
     entry fun modify_package_services_price(service_organization_cap: &ServiceOrganizationCap, organization_list: &mut OrganizationList, package_id: ID, price: u64) {
         // get ServiceOrganization
         let service_organization = get_service_organization(service_organization_cap, organization_list);
