@@ -411,12 +411,6 @@ module ticketing_system::customer {
 
         // for refunds due to your own reasons, a 10% fee will be charged
         let amount = purchase_price.value();
-        // if all canceled then return
-        if (amount == 0) {
-            services.destroy_empty();
-            purchase_price.destroy_zero();
-            return
-        };
         // split
         let fee = purchase_price.split(amount / 10);
         organization_list.join_organization_balance(organization_id, fee);
@@ -428,20 +422,19 @@ module ticketing_system::customer {
 
         // refunds
         transfer::public_transfer(coin::from_balance(purchase_price, ctx), ctx.sender());
-
-        // clear and destroy services
-        while (services.length() > 0) {
-            services.pop_back();
-        };
-        services.destroy_empty();
     }
 
-    entry fun enjoy_package_services(mut package_services_certification: PackageServicesCertification, enjoy_services: vector<ID>, organization_list: &mut OrganizationList, ctx: &mut TxContext) {
-        // get details
-        let organization_id = package_services_certification.organization_id;
-        let package_services_id = package_services_certification.package_services_id;
-        let services = &mut package_services_certification.services;
-        let purchase_price = &mut package_services_certification.purchase_price;
+    entry fun enjoy_package_services(package_services_certification: PackageServicesCertification, organization_list: &mut OrganizationList, ctx: &mut TxContext) {
+        // deconstruct PackageServicesCertification
+        let PackageServicesCertification {
+            id,
+            organization_id,
+            package_services_id,
+            services,
+            purchase_price,
+        } = package_services_certification;
+        // delete id
+        object::delete(id);
 
         // if the service organization has canceled, a direct refund will be issued
         // if the package_services has canceled, a direct refund will be issued
@@ -450,159 +443,18 @@ module ticketing_system::customer {
                 note: string::utf8(b"service organization or package services has canceled!"),
                 value: purchase_price.value(),
             });
-
-            let amount = purchase_price.value();
-            transfer::public_transfer(coin::take(purchase_price, amount, ctx), ctx.sender());
-
-            // deconstruct
-            let PackageServicesCertification {
-                id,
-                organization_id: _,
-                package_services_id: _,
-                mut services,
-                purchase_price,
-            } = package_services_certification;
-            // delete id
-            object::delete(id);
-            // destroy
-            purchase_price.destroy_zero();
-            while (services.length() > 0) {
-                services.pop_back();
-            };
-            services.destroy_empty();
-
+            transfer::public_transfer(coin::from_balance(purchase_price, ctx), ctx.sender());
             return
         };
 
         // if the corresponding service has been cancelled, the corresponding amount will be refunded directly
-        refund_canceled_package_services(organization_id, organization_list, services, purchase_price, ctx);
-
-        // if all canceled then return
-        if (purchase_price.value() == 0) {
-            // deconstruct
-            let PackageServicesCertification {
-                id,
-                organization_id: _,
-                package_services_id: _,
-                services,
-                purchase_price,
-            } = package_services_certification;
-            // delete id
-            object::delete(id);
-            // destroy
-            services.destroy_empty();
-            purchase_price.destroy_zero();
-
-            return
-        };
-
-        // check enjoy_services
-        let mut i = 0;
-        while (i < enjoy_services.length()) {
-            let service_id = enjoy_services[i];
-            assert!(services.contains(&service_id), ENotCorrectServicesList);
-
-            // remove this service
-            let (_, index) = services.index_of(&service_id);
-            services.remove(index);
-
-            i = i + 1;
-        };
-
-        // get value
-        let amount = purchase_price.value();
-        // payout ratio = enjoy_services.length() / (enjoy_services.length() + services.length())
-        // so we need to pay
-        let need_to_pay = if (services.length() != 0) amount / (enjoy_services.length() + services.length()) * enjoy_services.length() else amount;
+        refund_canceled_package_services(organization_id, organization_list, &mut services.clone(), &mut Balance::from(purchase_price.value()), ctx);
 
         // pay coin
-        organization_list.join_organization_balance(organization_id, purchase_price.split(need_to_pay));
+        organization_list.join_organization_balance(organization_id, purchase_price);
 
         event::emit(EnjoyEvent {
             note: string::utf8(b"good morning, and in case i don't see you, good afternoon, good evening, and good night!"),
         });
-
-        if (purchase_price.value() == 0) {
-            // deconstruct
-            let PackageServicesCertification {
-                id,
-                organization_id: _,
-                package_services_id: _,
-                services,
-                purchase_price,
-            } = package_services_certification;
-            // delete id
-            object::delete(id);
-            // destroy
-            services.destroy_empty();
-            purchase_price.destroy_zero();
-        } else {
-            // transfer to owner
-            transfer::transfer(package_services_certification, ctx.sender());
-        };
-    }
-
-    entry fun update_package_services(mut package_services_certification: PackageServicesCertification, organization_list: &OrganizationList, ctx: &mut TxContext) {
-        // get details
-        let organization_id = package_services_certification.organization_id;
-        let package_services_id = package_services_certification.package_services_id;
-        let services = &mut package_services_certification.services;
-        let purchase_price = &mut package_services_certification.purchase_price;
-
-        // if the service organization has canceled, a direct refund will be issued
-        // if the package_services has canceled, a direct refund will be issued
-        if (check_organization_canceled(&organization_id, organization_list) || check_package_services_canceled(organization_id, &package_services_id, organization_list)) {
-            event::emit(RefundEvent {
-                note: string::utf8(b"service organization or package services has canceled!"),
-                value: purchase_price.value(),
-            });
-
-            let amount = purchase_price.value();
-            transfer::public_transfer(coin::take(purchase_price, amount, ctx), ctx.sender());
-
-            // deconstruct
-            let PackageServicesCertification {
-                id,
-                organization_id: _,
-                package_services_id: _,
-                mut services,
-                purchase_price,
-            } = package_services_certification;
-            // delete id
-            object::delete(id);
-            // destroy
-            purchase_price.destroy_zero();
-            while (services.length() > 0) {
-                services.pop_back();
-            };
-            services.destroy_empty();
-
-            return
-        };
-
-        // if the corresponding service has been cancelled, the corresponding amount will be refunded directly
-        refund_canceled_package_services(organization_id, organization_list, services, purchase_price, ctx);
-
-        // if all canceled then return
-        if (purchase_price.value() == 0) {
-            // deconstruct
-            let PackageServicesCertification {
-                id,
-                organization_id: _,
-                package_services_id: _,
-                services,
-                purchase_price,
-            } = package_services_certification;
-            // delete id
-            object::delete(id);
-            // destroy
-            services.destroy_empty();
-            purchase_price.destroy_zero();
-
-            return
-        };
-
-        // still have services then transfer it to owner
-        transfer::transfer(package_services_certification, ctx.sender());
     }
 }
